@@ -22,11 +22,11 @@ app.use(cors({
     allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
-app.get("/", (req, res) => {
-    res.json({
-        name: "Nova-Search API",
-        version: "2.0.0",
-        status: "operational"
+app.get("/health", (req, res) => {
+    res.status(200).json({
+        success: true,
+        status: "healthy",
+        environment: process.env.NODE_ENV
     });
 });
 
