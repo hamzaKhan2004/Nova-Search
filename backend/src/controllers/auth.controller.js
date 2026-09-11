@@ -33,9 +33,18 @@ export async function register(req, res) {
             { expiresIn: "24h" }
         );
 
-        const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+        let requestOrigin = req.headers.origin;
+        if (!requestOrigin && req.headers.referer) {
+            try {
+                requestOrigin = new URL(req.headers.referer).origin;
+            } catch (e) {
+                // Ignore parse error
+            }
+        }
+        const frontendUrl = requestOrigin || process.env.FRONTEND_URL || "http://localhost:5173";
         const verificationUrl = `${frontendUrl}/verify-email?token=${emailVerificationToken}`;
 
+        let emailSent = true;
         try {
             await sendEmail({
                 to: email,
@@ -58,13 +67,16 @@ export async function register(req, res) {
                 text: `Hi ${username},\n\nPlease verify your email by visiting: ${verificationUrl}\n\nBest regards,\nThe Nova-Search Team`
             });
         } catch (emailError) {
+            emailSent = false;
             console.error("[AUTH] Email send warning:", emailError.message);
-            // We still create the user but inform them in dev/prod
         }
 
         return res.status(201).json({
-            message: "Account created. Please check your email to verify your account.",
+            message: emailSent
+                ? "Account created. Please check your email to verify your account."
+                : "Account created, but verification email could not be delivered. Please check email settings.",
             success: true,
+            emailSent,
             user: {
                 id: user._id,
                 username: user.username,
