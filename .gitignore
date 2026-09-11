@@ -1,0 +1,19 @@
+# Environment files
+.env
+.env*.local
+
+# System Architecture & Internal Logic Documentation (Private)
+ARCHITECTURE_AND_FLOWS.md
+*.private.md
+
+# Dependencies & Build artifacts
+node_modules/
+dist/
+build/
+.cache/
+
+# OS and Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
