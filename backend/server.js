@@ -10,6 +10,6 @@ connectDB();
 const httpServer = http.createServer(app);
 initSocket(httpServer);
 
-httpServer.listen(port, "0.0.0.0", () => {
+httpServer.listen(port, () => {
     console.log(`Server is running on port ${port}`);
 });
