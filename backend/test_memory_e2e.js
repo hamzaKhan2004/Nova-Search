@@ -7,8 +7,11 @@ import { generateResponse } from "./src/services/ai.service.js";
 
 async function runMemoryTest() {
     const mongoUri = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/perplexity";
-    await mongoose.connect(mongoUri);
-    console.log("Connected to MongoDB for memory test");
+    const dbName = process.env.DB_NAME || "Nova_Search";
+    await mongoose.connect(mongoUri, {
+        dbName
+    });
+    console.log(`Connected to MongoDB for memory test (${mongoose.connection.host} | Database: ${mongoose.connection.name})`);
 
     // Create or find test user
     let user = await userModel.findOne({ email: "memory_tester@test.com" });
