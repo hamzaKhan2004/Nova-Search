@@ -7,8 +7,10 @@ const Login = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [localError, setLocalError] = useState("");
+  const [showResend, setShowResend] = useState(false);
+  const [isResending, setIsResending] = useState(false);
 
-  const { handleLogin, user, loading, error, clearError } = useAuth();
+  const { handleLogin, handleResendVerification, user, loading, error, clearError } = useAuth();
   const { toast } = useToast();
   const navigate = useNavigate();
 
@@ -19,6 +21,7 @@ const Login = () => {
   const handleSubmit = async (event) => {
     event.preventDefault();
     setLocalError("");
+    setShowResend(false);
     clearError();
 
     const result = await handleLogin({
@@ -29,8 +32,27 @@ const Login = () => {
     if (result.success) {
       toast.success("Welcome back to Nova!");
       navigate("/");
-    } else if (result.error) {
-      toast.error(result.error);
+    } else {
+      const errMsg = result.message || "";
+      if (errMsg.toLowerCase().includes("verify your email")) {
+        setShowResend(true);
+      }
+      toast.error(errMsg || "Login failed");
+    }
+  };
+
+  const handleResend = async () => {
+    if (!email.trim()) {
+      toast.error("Please enter your email address to receive a verification link");
+      return;
+    }
+    setIsResending(true);
+    const res = await handleResendVerification(email.trim().toLowerCase());
+    setIsResending(false);
+    if (res.success) {
+      toast.success(res.message);
+    } else {
+      toast.error(res.message);
     }
   };
 
@@ -99,6 +121,22 @@ const Login = () => {
                 className="w-full rounded-xl border border-neutral-300 dark:border-neutral-700 bg-transparent px-3.5 py-2.5 text-sm text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 focus:outline-none focus:border-neutral-500 dark:focus:border-neutral-400 transition"
               />
             </div>
+
+            {showResend && (
+              <div className="p-3.5 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900/80 text-xs space-y-2">
+                <p className="text-neutral-600 dark:text-neutral-400">
+                  Account not verified yet? Click below to receive a new verification email link.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleResend}
+                  disabled={isResending}
+                  className="w-full py-2 px-3 cursor-pointer rounded-lg bg-neutral-900 hover:bg-neutral-800 dark:bg-white dark:text-black dark:hover:bg-neutral-200 text-white font-medium text-xs transition disabled:opacity-50"
+                >
+                  {isResending ? "Sending verification email..." : "Resend Verification Email"}
+                </button>
+              </div>
+            )}
 
             <button
               type="submit"

@@ -2,6 +2,9 @@
 .env
 .env*.local
 
+#local documents
+local-docs/
+
 # System Architecture & Internal Logic Documentation (Private)
 ARCHITECTURE_AND_FLOWS.md
 *.private.md
