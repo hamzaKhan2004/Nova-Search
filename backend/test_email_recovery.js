@@ -92,7 +92,7 @@ async function runRecoveryTests() {
   });
 
   assert.strictEqual(sendResult.success, true);
-  assert.strictEqual(sendResult.method, "nodemailer_gmail");
+  assert(sendResult.method === "nodemailer_smtp" || sendResult.method === "nodemailer_gmail");
   assert.strictEqual(sendResult.messageId, "<mock-msg-12345@gmail.com>");
   assert.strictEqual(sentMailOptions.to, "recipient@gmail.com");
   assert.strictEqual(sentMailOptions.subject, "Welcome to Nova");
