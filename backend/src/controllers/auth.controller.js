@@ -74,7 +74,7 @@ export async function register(req, res) {
         return res.status(201).json({
             message: emailSent
                 ? "Account created. Please check your email to verify your account."
-                : "Account created, but verification email could not be delivered. Please check email settings.",
+                : "Account created, but verification email could not be delivered. Please use 'Resend Verification Email' to receive a link.",
             success: true,
             emailSent,
             user: {
@@ -121,7 +121,9 @@ export async function login(req, res) {
             return res.status(403).json({
                 message: "Please verify your email before logging in",
                 success: false,
-                err: "Email not verified"
+                err: "Email not verified",
+                unverified: true,
+                email: user.email
             });
         }
 
@@ -285,6 +287,111 @@ export async function verifyEmail(req, res) {
         console.error("[AUTH] Verify email error:", error);
         return res.status(500).json({
             message: "Failed to verify email",
+            success: false,
+            err: error.message
+        });
+    }
+}
+
+const resendCooldowns = new Map(); // email -> timestamp
+const RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds rate limit per email
+
+export async function resendVerification(req, res) {
+    try {
+        const { email } = req.body;
+        if (!email || !email.trim()) {
+            return res.status(400).json({
+                message: "Email is required",
+                success: false,
+                err: "Email is required"
+            });
+        }
+
+        const normalizedEmail = email.toLowerCase().trim();
+
+        // 1. Rate limiting cooldown (60 seconds per email)
+        const lastSentAt = resendCooldowns.get(normalizedEmail);
+        if (lastSentAt && Date.now() - lastSentAt < RESEND_COOLDOWN_MS) {
+            const secondsRemaining = Math.ceil((RESEND_COOLDOWN_MS - (Date.now() - lastSentAt)) / 1000);
+            return res.status(429).json({
+                message: `Please wait ${secondsRemaining} second${secondsRemaining > 1 ? "s" : ""} before requesting another verification email.`,
+                success: false,
+                retryAfter: secondsRemaining
+            });
+        }
+
+        // Record cooldown timestamp for this email to prevent enumeration & spam floods
+        resendCooldowns.set(normalizedEmail, Date.now());
+
+        // 2. Lookup user
+        const user = await userModel.findOne({ email: normalizedEmail });
+
+        // 3. Security: Anti-enumeration check
+        // Avoid revealing whether arbitrary email addresses belong to registered users
+        if (!user) {
+            return res.status(200).json({
+                message: "If an unverified account with this email exists, a verification email has been sent.",
+                success: true
+            });
+        }
+
+        // 4. If user is already verified
+        if (user.verified) {
+            return res.status(200).json({
+                message: "This account is already verified. You can log in directly.",
+                success: true,
+                alreadyVerified: true
+            });
+        }
+
+        // 5. Generate fresh verification token
+        const emailVerificationToken = jwt.sign(
+            { email: user.email },
+            process.env.JWT_SECRET,
+            { expiresIn: "24h" }
+        );
+
+        let requestOrigin = req.headers.origin;
+        if (!requestOrigin && req.headers.referer) {
+            try {
+                requestOrigin = new URL(req.headers.referer).origin;
+            } catch (e) {
+                // Ignore parse error
+            }
+        }
+        const frontendUrl = requestOrigin || process.env.FRONTEND_URL || "http://localhost:5173";
+        const verificationUrl = `${frontendUrl}/verify-email?token=${emailVerificationToken}`;
+
+        // 6. Dispatch verification email via Nodemailer
+        await sendEmail({
+            to: user.email,
+            subject: "Verify your email - Nova-Search",
+            html: `
+                <div style="font-family: sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; border: 1px solid #e4e4e7; border-radius: 12px; background: #fafafa;">
+                    <h2 style="color: #09090b; margin-top: 0;">Nova-Search Verification</h2>
+                    <p style="color: #3f3f46; font-size: 15px; line-height: 1.5;">Hi ${user.username},</p>
+                    <p style="color: #3f3f46; font-size: 15px; line-height: 1.5;">Here is your requested verification link to activate your Nova-Search account:</p>
+                    <div style="margin: 28px 0;">
+                        <a href="${verificationUrl}" style="background: #0ea5e9; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block;">Verify Email</a>
+                    </div>
+                    <p style="color: #71717a; font-size: 13px; line-height: 1.4;">Or copy and paste this link in your browser:</p>
+                    <p style="color: #0ea5e9; font-size: 13px; word-break: break-all;">${verificationUrl}</p>
+                    <p style="color: #71717a; font-size: 13px; margin-top: 24px;">This link is valid for 24 hours. If you did not request this email, please disregard it.</p>
+                    <hr style="border: none; border-top: 1px solid #e4e4e7; margin: 24px 0;" />
+                    <p style="color: #a1a1aa; font-size: 12px; margin-bottom: 0;">&copy; ${new Date().getFullYear()} Nova-Search. All rights reserved.</p>
+                </div>
+            `,
+            text: `Hi ${user.username},\n\nPlease verify your email by visiting: ${verificationUrl}\n\nThis link is valid for 24 hours.\n\nBest regards,\nThe Nova-Search Team`
+        });
+
+        return res.status(200).json({
+            message: "A new verification email has been sent. Please check your inbox.",
+            success: true
+        });
+    } catch (error) {
+        console.error("[AUTH] Resend verification error:", error.message);
+        return res.status(500).json({
+            message: "Failed to dispatch verification email. Please try again later.",
             success: false,
             err: error.message
         });

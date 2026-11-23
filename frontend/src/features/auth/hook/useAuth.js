@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { useDispatch, useSelector } from "react-redux";
-import { register, login, logout, getMe, verifyEmail } from "../services/auth.api";
+import { register, login, logout, getMe, verifyEmail, resendVerification } from "../services/auth.api";
 import { setUser, setLoading, setError } from "../auth.slice";
 import { setChats, setCurrentChatId, resetActiveChat } from "../../chat/chat.slice";
 import { disconnectSocket } from "../../chat/service/chat.socket";
@@ -18,6 +18,8 @@ export function useAuth() {
             const data = await register({ email, username, password });
             return {
                 success: true,
+                emailSent: data.emailSent !== false,
+                registeredEmail: email,
                 message: data.message || "Account created. Please check your email to verify your account."
             };
         } catch (err) {
@@ -107,6 +109,31 @@ export function useAuth() {
         }
     }, []);
 
+    const handleResendVerification = useCallback(async (email) => {
+        try {
+            dispatch(setLoading(true));
+            const data = await resendVerification(email);
+            return {
+                success: true,
+                message: data.message || "Verification email sent. Please check your inbox.",
+                alreadyVerified: Boolean(data.alreadyVerified)
+            };
+        } catch (err) {
+            const msg =
+                err.response?.data?.message ||
+                err.response?.data?.err ||
+                err.message ||
+                "Failed to resend verification email.";
+            return {
+                success: false,
+                message: msg,
+                retryAfter: err.response?.data?.retryAfter
+            };
+        } finally {
+            dispatch(setLoading(false));
+        }
+    }, [dispatch]);
+
     const clearError = useCallback(() => {
         dispatch(setError(null));
     }, [dispatch]);
@@ -120,6 +147,7 @@ export function useAuth() {
         handleLogout,
         handleGetMe,
         handleVerifyEmail,
+        handleResendVerification,
         clearError
     };
 }

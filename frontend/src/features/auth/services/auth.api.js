@@ -35,4 +35,9 @@ export async function verifyEmail(token) {
     return response.data;
 }
 
+export async function resendVerification(email) {
+    const response = await api.post("/api/auth/resend-verification", { email });
+    return response.data;
+}
+
 export default api;

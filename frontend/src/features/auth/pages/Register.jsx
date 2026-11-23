@@ -10,8 +10,11 @@ const Register = () => {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [localError, setLocalError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
+  const [emailDelivered, setEmailDelivered] = useState(true);
+  const [registeredEmail, setRegisteredEmail] = useState("");
+  const [isResending, setIsResending] = useState(false);
 
-  const { handleRegister, user, loading, error, clearError } = useAuth();
+  const { handleRegister, handleResendVerification, user, loading, error, clearError } = useAuth();
   const { toast } = useToast();
 
   if (user) {
@@ -46,9 +49,28 @@ const Register = () => {
 
     if (result.success) {
       setSuccessMessage(result.message);
-      toast.success("Account created successfully! Verification email sent.");
+      setRegisteredEmail(email.trim().toLowerCase());
+      setEmailDelivered(result.emailSent !== false);
+      if (result.emailSent === false) {
+        toast.info(result.message);
+      } else {
+        toast.success("Account created successfully! Verification email sent.");
+      }
     } else if (result.error) {
       toast.error(result.error);
+    }
+  };
+
+  const handleResend = async () => {
+    if (!registeredEmail) return;
+    setIsResending(true);
+    const res = await handleResendVerification(registeredEmail);
+    setIsResending(false);
+    if (res.success) {
+      toast.success(res.message);
+      setEmailDelivered(true);
+    } else {
+      toast.error(res.message);
     }
   };
 
@@ -73,22 +95,42 @@ const Register = () => {
           {successMessage ? (
             <div className="space-y-5 text-center">
               <div className="mx-auto w-12 h-12 rounded-full bg-neutral-100 dark:bg-neutral-800 text-neutral-900 dark:text-white flex items-center justify-center">
-                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
-                </svg>
+                {emailDelivered ? (
+                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                ) : (
+                  <svg className="w-6 h-6 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                )}
               </div>
               <div>
                 <h3 className="text-lg font-semibold text-neutral-900 dark:text-white">
-                  Account Created!
+                  {emailDelivered ? "Account Created!" : "Verification Pending"}
                 </h3>
                 <p className="mt-2 text-sm text-neutral-600 dark:text-neutral-300 leading-relaxed">
                   {successMessage}
                 </p>
               </div>
-              <div className="pt-2">
+              <div className="pt-2 flex flex-col gap-2">
+                {!emailDelivered && (
+                  <button
+                    type="button"
+                    onClick={handleResend}
+                    disabled={isResending}
+                    className="inline-flex cursor-pointer justify-center w-full rounded-xl bg-neutral-900 hover:bg-neutral-800 dark:bg-white dark:text-black dark:hover:bg-neutral-200 text-white font-medium py-2.5 px-4 text-sm transition focus:outline-none disabled:opacity-50"
+                  >
+                    {isResending ? "Sending verification email..." : "Resend Verification Email"}
+                  </button>
+                )}
                 <Link
                   to="/login"
-                  className="inline-flex cursor-pointer justify-center w-full rounded-xl bg-black hover:bg-neutral-800 dark:bg-white dark:text-black dark:hover:bg-neutral-200 text-white font-medium py-2.5 px-4 text-sm transition focus:outline-none"
+                  className={`inline-flex cursor-pointer justify-center w-full rounded-xl ${
+                    emailDelivered
+                      ? "bg-black hover:bg-neutral-800 dark:bg-white dark:text-black dark:hover:bg-neutral-200 text-white"
+                      : "border border-neutral-300 dark:border-neutral-700 text-neutral-800 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                  } font-medium py-2.5 px-4 text-sm transition focus:outline-none`}
                 >
                   Proceed to Login
                 </Link>
