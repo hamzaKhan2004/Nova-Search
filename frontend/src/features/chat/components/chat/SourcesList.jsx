@@ -1,3 +1,20 @@
+function formatPublishedDate(rawDate) {
+    if (!rawDate) return null;
+    try {
+        const d = new Date(rawDate);
+        if (isNaN(d.getTime())) {
+            return rawDate.length > 20 ? rawDate.slice(0, 20) : rawDate;
+        }
+        return d.toLocaleDateString("en-US", {
+            month: "short",
+            day: "numeric",
+            year: "numeric"
+        });
+    } catch {
+        return null;
+    }
+}
+
 export default function SourcesList({ sources }) {
     if (!sources || sources.length === 0) return null;
 
@@ -31,6 +48,14 @@ export default function SourcesList({ sources }) {
                         <div className="flex items-center gap-1.5 text-[11px] font-medium text-neutral-500 dark:text-neutral-400 truncate mb-1">
                             <span className="w-1.5 h-1.5 rounded-full bg-neutral-400 dark:bg-neutral-500"></span>
                             <span className="truncate">{src.domain || "Web Source"}</span>
+                            {src.publishedDate && (
+                                <>
+                                    <span className="text-neutral-300 dark:text-neutral-600">•</span>
+                                    <span className="text-[10px] text-neutral-400 dark:text-neutral-500 font-normal">
+                                        {formatPublishedDate(src.publishedDate)}
+                                    </span>
+                                </>
+                            )}
                         </div>
                         <p className="text-xs font-medium text-neutral-900 dark:text-neutral-100 group-hover:underline line-clamp-1 transition">
                             {src.title}

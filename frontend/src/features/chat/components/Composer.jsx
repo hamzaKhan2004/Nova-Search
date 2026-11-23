@@ -105,6 +105,11 @@ export default function Composer({
     };
 
     const handleKeyDown = (e) => {
+        if (e.key === "Escape" && isStreaming) {
+            e.preventDefault();
+            onStop();
+            return;
+        }
         if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             if (isStreaming) {

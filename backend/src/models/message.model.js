@@ -26,7 +26,15 @@ const messageSchema = new mongoose.Schema(
                     title: String,
                     url: String,
                     domain: String,
-                    snippet: String
+                    snippet: String,
+                    publishedDate: {
+                        type: String,
+                        default: null
+                    },
+                    score: {
+                        type: Number,
+                        default: null
+                    }
                 }
             ],
             toolCalls: [

@@ -9,10 +9,12 @@ export const TOOL_RISK = {
 export const TOOLS_CONFIG = {
     searchInternet: {
         name: "searchInternet",
-        description: "Search the web for real-time, current, or recent information.",
+        description: "Search the web for real-time, current, or recent information and latest news.",
         risk: TOOL_RISK.READ_ONLY,
         parameters: {
-            query: { type: "string", description: "Search query" }
+            query: { type: "string", description: "Search query" },
+            topic: { type: "string", description: "Search topic: 'general' or 'news'" },
+            days: { type: "number", description: "Number of days back for news search (e.g. 1 for today, 7 for this week)" }
         }
     },
     generateEmailDraft: {
@@ -46,7 +48,12 @@ export function isSensitiveTool(toolName) {
  */
 export async function executeReadOnlyTool(toolName, params) {
     if (toolName === "searchInternet") {
-        return await searchInternet({ query: params.query });
+        return await searchInternet({
+            query: params.query,
+            topic: params.topic,
+            days: params.days,
+            timeRange: params.timeRange
+        });
     }
     if (toolName === "generateEmailDraft") {
         return {
