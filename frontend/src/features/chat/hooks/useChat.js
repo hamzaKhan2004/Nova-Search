@@ -16,6 +16,7 @@ import {
     setCurrentChatId,
     setLoading,
     setError,
+    resetGenerationState,
     setGenerationStatus,
     setSources,
     setStreamingChunk,
@@ -46,6 +47,23 @@ export const useChat = () => {
     const activeChatRef = useRef(currentChatId);
     const streamingMessageRef = useRef(streamingMessage);
     const battleModeRef = useRef(battleMode);
+    const watchdogTimerRef = useRef(null);
+
+    const clearWatchdog = useCallback(() => {
+        if (watchdogTimerRef.current) {
+            clearTimeout(watchdogTimerRef.current);
+            watchdogTimerRef.current = null;
+        }
+    }, []);
+
+    const resetWatchdog = useCallback((timeoutMs = 45000) => {
+        clearWatchdog();
+        watchdogTimerRef.current = setTimeout(() => {
+            console.warn(`[CHAT] Generation watchdog timeout reached (${Math.round(timeoutMs / 1000)}s). Resetting UI state.`);
+            dispatch(setError("Response took too long to complete. Please retry your question."));
+            dispatch(resetGenerationState());
+        }, timeoutMs);
+    }, [clearWatchdog, dispatch]);
 
     useEffect(() => {
         activeChatRef.current = currentChatId;
@@ -82,39 +100,48 @@ export const useChat = () => {
         const onStatus = (data) => {
             if (data?.label) {
                 dispatch(setGenerationStatus(data.label));
+                resetWatchdog(45000);
             }
         };
 
         const onSources = (data) => {
             if (data?.sources) {
                 dispatch(setSources({ chatId: data.chatId, sources: data.sources }));
+                resetWatchdog(45000);
             }
         };
 
         const onChunk = (data) => {
             if (data?.chunk) {
                 dispatch(setStreamingChunk({ chatId: data.chatId, chunk: data.chunk }));
+                resetWatchdog(30000);
             }
         };
 
         const onActionRequired = (data) => {
+            clearWatchdog();
             dispatch(setActionRequired(data));
         };
 
         const onDone = (data) => {
+            clearWatchdog();
             if (data?.chatId && data?.message) {
                 dispatch(finalizeStreamingMessage({
                     chatId: data.chatId,
                     message: data.message
                 }));
+            } else {
+                dispatch(resetGenerationState());
             }
         };
 
         const onStopped = (data) => {
+            clearWatchdog();
             dispatch(stopStreaming({
                 chatId: data?.chatId,
                 message: data?.message
             }));
+            dispatch(resetGenerationState());
         };
 
         const onActionCompleted = (data) => {
@@ -141,8 +168,21 @@ export const useChat = () => {
         };
 
         const onChatError = (data) => {
+            clearWatchdog();
             dispatch(setError(data?.message || "An error occurred during response generation."));
-            dispatch(setGenerationStatus(null));
+            dispatch(resetGenerationState());
+        };
+
+        const onDisconnect = (reason) => {
+            console.warn("[SOCKET] Disconnected:", reason);
+            clearWatchdog();
+            dispatch(resetGenerationState());
+        };
+
+        const onConnectError = (err) => {
+            console.warn("[SOCKET] Connection error:", err?.message);
+            clearWatchdog();
+            dispatch(resetGenerationState());
         };
 
         socket.on("chat:created", onChatCreated);
@@ -157,8 +197,11 @@ export const useChat = () => {
         socket.on("action:cancelled", onActionCancelled);
         socket.on("action:error", onActionError);
         socket.on("chat:error", onChatError);
+        socket.on("disconnect", onDisconnect);
+        socket.on("connect_error", onConnectError);
 
         return () => {
+            clearWatchdog();
             socket.off("chat:created", onChatCreated);
             socket.off("chat:message_saved", onMessageSaved);
             socket.off("chat:status", onStatus);
@@ -171,197 +214,205 @@ export const useChat = () => {
             socket.off("action:cancelled", onActionCancelled);
             socket.off("action:error", onActionError);
             socket.off("chat:error", onChatError);
+            socket.off("disconnect", onDisconnect);
+            socket.off("connect_error", onConnectError);
         };
-    }, [dispatch, toast]);
+}, [clearWatchdog, dispatch, resetWatchdog, toast]);
 
-    // Send Message via Socket (with HTTP fallback if needed)
-    const handleSendMessage = useCallback(async ({ message, chatId }) => {
-        const socket = getSocket();
-        const targetChatId = chatId || activeChatRef.current;
+// Send Message via Socket (with HTTP fallback if needed)
+const handleSendMessage = useCallback(async ({ message, chatId }) => {
+    const socket = getSocket();
+    const targetChatId = chatId || activeChatRef.current;
 
-        dispatch(setError(null));
+    dispatch(setError(null));
+    dispatch(resetGenerationState());
 
-        const isBattle = Boolean(battleModeRef.current);
+    const isBattle = Boolean(battleModeRef.current);
 
-        if (socket && socket.connected) {
-            socket.emit("chat:send", {
-                message,
-                chatId: targetChatId,
-                battleMode: isBattle
-            });
-        } else {
-            // HTTP Fallback
-            try {
-                dispatch(setLoading(true));
-                const data = await sendMessageHttp({ message, chatId: targetChatId, battleMode: isBattle });
-                const { chat, aiMessage, title } = data;
-                const newOrExistingChatId = targetChatId || chat?._id;
-
-                if (!targetChatId && chat) {
-                    dispatch(createNewChat({
-                        chatId: newOrExistingChatId,
-                        title: title || chat.title
-                    }));
-                }
-
-                dispatch(addNewMessage({
-                    chatId: newOrExistingChatId,
-                    content: message,
-                    role: "user"
-                }));
-
-                if (aiMessage) {
-                    dispatch(addNewMessage({
-                        chatId: newOrExistingChatId,
-                        content: aiMessage.content,
-                        role: aiMessage.role,
-                        metadata: aiMessage.metadata,
-                        id: aiMessage._id
-                    }));
-                }
-
-                dispatch(setCurrentChatId(newOrExistingChatId));
-            } catch (err) {
-                dispatch(setError(err.response?.data?.message || err.message || "Failed to send message"));
-            } finally {
-                dispatch(setLoading(false));
-            }
-        }
-    }, [dispatch]);
-
-    // Stop active generation
-    const handleStopGeneration = useCallback(() => {
-        const socket = getSocket();
-        const activeChat = activeChatRef.current;
-        const currentStreaming = streamingMessageRef.current;
-
-        if (socket && socket.connected) {
-            socket.emit("chat:stop", {
-                chatId: activeChat,
-                partialContent: currentStreaming?.content || ""
-            });
-        }
-        dispatch(stopStreaming({ chatId: activeChat }));
-    }, [dispatch]);
-
-    // Confirm or cancel sensitive tool action (e.g. send email)
-    const handleConfirmAction = useCallback(({ actionId, approved, parameters }) => {
-        const socket = getSocket();
-        if (socket && socket.connected) {
-            socket.emit("action:confirm", {
-                actionId,
-                approved,
-                parameters,
-                chatId: activeChatRef.current
-            });
-        }
-    }, []);
-
-    // Get all user chats
-    const handleGetChats = useCallback(async () => {
+    if (socket && socket.connected) {
+        resetWatchdog(45000);
+        socket.emit("chat:send", {
+            message,
+            chatId: targetChatId,
+            battleMode: isBattle
+        });
+    } else {
+        clearWatchdog();
+        // HTTP Fallback
         try {
             dispatch(setLoading(true));
-            const data = await getChats();
-            const { chats: list = [] } = data;
+            const data = await sendMessageHttp({ message, chatId: targetChatId, battleMode: isBattle });
+            const { chat, aiMessage, title } = data;
+            const newOrExistingChatId = targetChatId || chat?._id;
 
-            const chatMap = list.reduce((acc, c) => {
-                acc[c._id] = {
-                    id: c._id,
-                    title: c.title,
-                    messages: [],
-                    lastUpdated: c.updatedAt || c.createdAt
-                };
-                return acc;
-            }, {});
+            if (!targetChatId && chat) {
+                dispatch(createNewChat({
+                    chatId: newOrExistingChatId,
+                    title: title || chat.title
+                }));
+            }
 
-            dispatch(setChats(chatMap));
+            dispatch(addNewMessage({
+                chatId: newOrExistingChatId,
+                content: message,
+                role: "user"
+            }));
+
+            if (aiMessage) {
+                dispatch(addNewMessage({
+                    chatId: newOrExistingChatId,
+                    content: aiMessage.content,
+                    role: aiMessage.role,
+                    metadata: aiMessage.metadata,
+                    id: aiMessage._id
+                }));
+            }
+
+            dispatch(setCurrentChatId(newOrExistingChatId));
         } catch (err) {
-            console.error("[CHAT] Failed to get chats:", err);
-            dispatch(setError("Failed to load chat history"));
+            dispatch(setError(err.response?.data?.message || err.message || "Failed to send message"));
+        } finally {
+            dispatch(setLoading(false));
+            dispatch(resetGenerationState());
+        }
+    }
+    }, [clearWatchdog, dispatch, resetWatchdog]);
+
+// Stop active generation
+const handleStopGeneration = useCallback(() => {
+    clearWatchdog();
+    const socket = getSocket();
+    const activeChat = activeChatRef.current;
+    const currentStreaming = streamingMessageRef.current;
+
+    if (socket && socket.connected) {
+        socket.emit("chat:stop", {
+            chatId: activeChat,
+            partialContent: currentStreaming?.content || ""
+        });
+    }
+    dispatch(stopStreaming({ chatId: activeChat }));
+dispatch(resetGenerationState());
+    }, [clearWatchdog, dispatch]);
+
+// Confirm or cancel sensitive tool action (e.g. send email)
+const handleConfirmAction = useCallback(({ actionId, approved, parameters }) => {
+    const socket = getSocket();
+    if (socket && socket.connected) {
+        socket.emit("action:confirm", {
+            actionId,
+            approved,
+            parameters,
+            chatId: activeChatRef.current
+        });
+    }
+}, []);
+
+// Get all user chats
+const handleGetChats = useCallback(async () => {
+    try {
+        dispatch(setLoading(true));
+        const data = await getChats();
+        const { chats: list = [] } = data;
+
+        const chatMap = list.reduce((acc, c) => {
+            acc[c._id] = {
+                id: c._id,
+                title: c.title,
+                messages: [],
+                lastUpdated: c.updatedAt || c.createdAt
+            };
+            return acc;
+        }, {});
+
+        dispatch(setChats(chatMap));
+    } catch (err) {
+        console.error("[CHAT] Failed to get chats:", err);
+        dispatch(setError("Failed to load chat history"));
+    } finally {
+        dispatch(setLoading(false));
+    }
+}, [dispatch]);
+
+// Open chat and fetch messages if needed
+const handleOpenChat = useCallback(async (chatId) => {
+    if (!chatId) return;
+
+    dispatch(setCurrentChatId(chatId));
+
+    if (!chats[chatId]?.messages || chats[chatId].messages.length === 0) {
+        try {
+            dispatch(setLoading(true));
+            const data = await getMessages(chatId);
+            const { messages = [] } = data;
+
+            dispatch(addMessages({
+                chatId,
+                messages: messages.map(m => ({
+                    id: m._id,
+                    content: m.content,
+                    role: m.role,
+                    metadata: m.metadata || {},
+                    createdAt: m.createdAt
+                }))
+            }));
+        } catch (err) {
+            console.error("[CHAT] Failed to get messages:", err);
+            dispatch(setError("Failed to load conversation messages"));
         } finally {
             dispatch(setLoading(false));
         }
-    }, [dispatch]);
+    }
+}, [chats, dispatch]);
 
-    // Open chat and fetch messages if needed
-    const handleOpenChat = useCallback(async (chatId) => {
-        if (!chatId) return;
+// Delete chat
+const handleDeleteChat = useCallback(async (chatId) => {
+    try {
+        await deleteChatApi(chatId);
+        dispatch(deleteChatSuccess(chatId));
+    } catch (err) {
+        console.error("[CHAT] Delete chat error:", err);
+        dispatch(setError("Failed to delete chat"));
+    }
+}, [dispatch]);
 
-        dispatch(setCurrentChatId(chatId));
+// Rename chat
+const handleRenameChat = useCallback(async (chatId, newTitle) => {
+    if (!newTitle || !newTitle.trim()) return;
+    try {
+        await renameChatApi(chatId, newTitle.trim());
+        dispatch(renameChatSuccess({ chatId, title: newTitle.trim() }));
+    } catch (err) {
+        console.error("[CHAT] Rename chat error:", err);
+        dispatch(setError("Failed to rename chat"));
+    }
+}, [dispatch]);
 
-        if (!chats[chatId]?.messages || chats[chatId].messages.length === 0) {
-            try {
-                dispatch(setLoading(true));
-                const data = await getMessages(chatId);
-                const { messages = [] } = data;
+// Start a fresh, clean conversation state without database record
+const handleNewChat = useCallback(() => {
+    dispatch(resetActiveChat());
+}, [dispatch]);
 
-                dispatch(addMessages({
-                    chatId,
-                    messages: messages.map(m => ({
-                        id: m._id,
-                        content: m.content,
-                        role: m.role,
-                        metadata: m.metadata || {},
-                        createdAt: m.createdAt
-                    }))
-                }));
-            } catch (err) {
-                console.error("[CHAT] Failed to get messages:", err);
-                dispatch(setError("Failed to load conversation messages"));
-            } finally {
-                dispatch(setLoading(false));
-            }
-        }
-    }, [chats, dispatch]);
-
-    // Delete chat
-    const handleDeleteChat = useCallback(async (chatId) => {
-        try {
-            await deleteChatApi(chatId);
-            dispatch(deleteChatSuccess(chatId));
-        } catch (err) {
-            console.error("[CHAT] Delete chat error:", err);
-            dispatch(setError("Failed to delete chat"));
-        }
-    }, [dispatch]);
-
-    // Rename chat
-    const handleRenameChat = useCallback(async (chatId, newTitle) => {
-        if (!newTitle || !newTitle.trim()) return;
-        try {
-            await renameChatApi(chatId, newTitle.trim());
-            dispatch(renameChatSuccess({ chatId, title: newTitle.trim() }));
-        } catch (err) {
-            console.error("[CHAT] Rename chat error:", err);
-            dispatch(setError("Failed to rename chat"));
-        }
-    }, [dispatch]);
-
-    // Start a fresh, clean conversation state without database record
-    const handleNewChat = useCallback(() => {
-        dispatch(resetActiveChat());
-    }, [dispatch]);
-
-    return {
-        chats,
-        currentChatId,
-        isLoading,
-        error,
-        streamingMessage,
-        generationStatus,
-        activeAction,
-        searchQuery,
-        battleMode,
-        handleSendMessage,
-        handleStopGeneration,
-        handleConfirmAction,
-        handleGetChats,
-        handleOpenChat,
-        handleDeleteChat,
-        handleRenameChat,
-        handleNewChat,
-        handleToggleBattleMode: () => dispatch(toggleBattleMode()),
-        handleSetBattleMode: (val) => dispatch(setBattleMode(val)),
-        clearChatError: () => dispatch(setError(null))
-    };
+return {
+    chats,
+    currentChatId,
+    isLoading,
+    error,
+    streamingMessage,
+    generationStatus,
+    activeAction,
+    searchQuery,
+    battleMode,
+    handleSendMessage,
+    handleStopGeneration,
+    handleConfirmAction,
+    handleGetChats,
+    handleOpenChat,
+    handleDeleteChat,
+    handleRenameChat,
+    handleNewChat,
+    handleToggleBattleMode: () => dispatch(toggleBattleMode()),
+    handleSetBattleMode: (val) => dispatch(setBattleMode(val)),
+    clearChatError: () => dispatch(setError(null))
+};
 };

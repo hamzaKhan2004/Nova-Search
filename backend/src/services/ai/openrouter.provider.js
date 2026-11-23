@@ -1,4 +1,4 @@
-import { searchInternet } from "../internet.service.js";
+import { searchInternet, isNewsQuery } from "../internet.service.js";
 import { needsInternetSearch } from "./gemini.provider.js";
 
 export class OpenRouterProvider {
@@ -17,25 +17,24 @@ export class OpenRouterProvider {
         return process.env.OPEN_ROUTER_API_KEY;
     }
 
-    async generate({ messages, systemPrompt, onStatus }) {
+    async generate({ messages, systemPrompt, sources = [], onStatus }) {
         const apiKey = this.getApiKey();
         const model = this.getModelName();
         const lastUserMsg = [...messages].reverse().find(m => m.role === "user")?.content || "";
 
-        let sources = [];
-        let searchContext = "";
+        let currentSources = sources;
+        let formattedSystem = systemPrompt;
 
-        if (needsInternetSearch(lastUserMsg)) {
-            if (onStatus) onStatus({ status: "searching", label: "Searching the web..." });
+        if (currentSources.length === 0 && needsInternetSearch(lastUserMsg) && !systemPrompt.includes("[REAL-TIME SEARCH RESULTS]")) {
+            const isNews = isNewsQuery(lastUserMsg);
+            if (onStatus) onStatus({ status: "searching", label: isNews ? "Searching latest news..." : "Searching the web..." });
             const searchRes = await searchInternet({ query: lastUserMsg });
-            sources = searchRes.sources || [];
+            currentSources = searchRes.sources || [];
             if (searchRes.text) {
-                searchContext = `\n\n[REAL-TIME SEARCH RESULTS]\n${searchRes.text}`;
+                formattedSystem = `${systemPrompt}\n\n[REAL-TIME SEARCH RESULTS]\n${searchRes.text}\n\n[SEARCH DIRECTIVE]: Prioritize recent and up-to-date information from the real-time search results above when answering. Use the provided publication dates to establish timeline and recency. Do not fabricate dates or cite sources outside the provided results.`;
             }
             if (onStatus) onStatus({ status: "reading", label: "Reading sources..." });
         }
-
-        const formattedSystem = `${systemPrompt}${searchContext}`;
 
         if (onStatus) onStatus({ status: "generating", label: "Generating response via fallback..." });
 
@@ -56,6 +55,7 @@ export class OpenRouterProvider {
 
         for (const model of candidateModels) {
             try {
+                const requestSignal = AbortSignal.timeout(35000);
                 const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                     method: "POST",
                     headers: {
@@ -68,7 +68,8 @@ export class OpenRouterProvider {
                         model,
                         messages: openRouterMessages,
                         temperature: 0.5
-                    })
+                    }),
+                    signal: requestSignal
                 });
 
                 const data = await response.json();
@@ -84,7 +85,7 @@ export class OpenRouterProvider {
 
                 return {
                     content,
-                    sources,
+                    sources: currentSources,
                     provider: "openrouter",
                     model
                 };
@@ -98,29 +99,27 @@ export class OpenRouterProvider {
         }
     }
 
-    async *stream({ messages, systemPrompt, onStatus, signal }) {
+    async *stream({ messages, systemPrompt, sources = [], onStatus, signal }) {
         const apiKey = this.getApiKey();
         const model = this.getModelName();
         const lastUserMsg = [...messages].reverse().find(m => m.role === "user")?.content || "";
 
-        let sources = [];
-        let searchContext = "";
+        let currentSources = sources;
+        let formattedSystem = systemPrompt;
 
-        if (needsInternetSearch(lastUserMsg)) {
-            if (onStatus) onStatus({ status: "searching", label: "Searching the web..." });
+        if (currentSources.length === 0 && needsInternetSearch(lastUserMsg) && !systemPrompt.includes("[REAL-TIME SEARCH RESULTS]")) {
+            const isNews = isNewsQuery(lastUserMsg);
+            if (onStatus) onStatus({ status: "searching", label: isNews ? "Searching latest news..." : "Searching the web..." });
             const searchRes = await searchInternet({ query: lastUserMsg });
-            sources = searchRes.sources || [];
+            currentSources = searchRes.sources || [];
             if (searchRes.text) {
-                searchContext = `\n\n[REAL-TIME SEARCH RESULTS]\n${searchRes.text}`;
+                formattedSystem = `${systemPrompt}\n\n[REAL-TIME SEARCH RESULTS]\n${searchRes.text}\n\n[SEARCH DIRECTIVE]: Prioritize recent and up-to-date information from the real-time search results above when answering. Use the provided publication dates to establish timeline and recency. Do not fabricate dates or cite sources outside the provided results.`;
             }
             if (onStatus) onStatus({ status: "reading", label: "Reading sources..." });
+            if (currentSources.length > 0) {
+                yield { type: "sources", sources: currentSources };
+            }
         }
-
-        if (sources.length > 0) {
-            yield { type: "sources", sources };
-        }
-
-        const formattedSystem = `${systemPrompt}${searchContext}`;
 
         if (onStatus) onStatus({ status: "generating", label: "Generating response..." });
 
@@ -139,8 +138,12 @@ export class OpenRouterProvider {
 
         let lastError = null;
 
-        for (const model of candidateModels) {
+        for (const candidate of candidateModels) {
             try {
+                const requestSignal = signal
+                    ? AbortSignal.any([signal, AbortSignal.timeout(35000)])
+                    : AbortSignal.timeout(35000);
+
                 const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                     method: "POST",
                     headers: {
@@ -150,12 +153,12 @@ export class OpenRouterProvider {
                         "X-Title": "Nova-Search"
                     },
                     body: JSON.stringify({
-                        model,
+                        model: candidate,
                         messages: openRouterMessages,
                         stream: true,
                         temperature: 0.5
                     }),
-                    signal
+                    signal: requestSignal
                 });
 
                 if (!response.ok) {
@@ -167,7 +170,7 @@ export class OpenRouterProvider {
                     } catch {
                         // Keep raw
                     }
-                    const err = new Error(`OpenRouter (${model}) error: ${parsedMessage}`);
+                    const err = new Error(`OpenRouter (${candidate}) error: ${parsedMessage}`);
                     err.status = response.status;
                     lastError = err;
                     continue; // try next candidate model
@@ -183,7 +186,7 @@ export class OpenRouterProvider {
                 let chunksYielded = 0;
 
                 while (true) {
-                    if (signal?.aborted) {
+                    if (signal?.aborted || requestSignal?.aborted) {
                         reader.cancel();
                         break;
                     }

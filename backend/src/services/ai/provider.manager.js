@@ -1,6 +1,7 @@
-import { GeminiProvider } from "./gemini.provider.js";
+import { GeminiProvider, needsInternetSearch } from "./gemini.provider.js";
 import { OpenRouterProvider } from "./openrouter.provider.js";
 import { formatMemoriesForContext } from "./memory.service.js";
+import { searchInternet, isNewsQuery } from "../internet.service.js";
 
 const DEFAULT_SYSTEM_PROMPT = `You are Nova, an advanced, highly capable, and precise AI search and coding assistant.
 Guidelines:
@@ -82,14 +83,34 @@ export class AIProviderManager {
     }
 
     async generateResponse({ messages, preferences = {}, memories = [], extraContext = "", onStatus }) {
-        const systemPrompt = this.buildSystemPrompt(preferences, memories, extraContext);
+        const baseSystemPrompt = this.buildSystemPrompt(preferences, memories, extraContext);
         const primary = this.getPrimaryProvider();
         const fallback = this.getFallbackProvider();
+
+        const lastUserMsg = [...messages].reverse().find(m => m.role === "user")?.content || "";
+        let sources = [];
+        let systemPrompt = baseSystemPrompt;
+
+        // Perform search once so both primary and fallback share identical context
+        if (needsInternetSearch(lastUserMsg)) {
+            const isNews = isNewsQuery(lastUserMsg);
+            if (onStatus) onStatus({ status: "searching", label: isNews ? "Searching latest news..." : "Searching the web..." });
+            try {
+                const searchRes = await searchInternet({ query: lastUserMsg });
+                sources = searchRes.sources || [];
+                if (searchRes.text) {
+                    systemPrompt = `${baseSystemPrompt}\n\n[REAL-TIME SEARCH RESULTS]\n${searchRes.text}\n\n[SEARCH DIRECTIVE]: Prioritize recent and up-to-date information from the real-time search results above when answering. Use the provided publication dates to establish timeline and recency. Do not fabricate dates or cite sources outside the provided results.`;
+                }
+            } catch (sErr) {
+                console.warn("[AI] Search error during generateResponse:", sErr.message);
+            }
+            if (onStatus) onStatus({ status: "reading", label: "Reading sources..." });
+        }
 
         // 1. Try Primary Provider
         try {
             console.log(`[AI] Attempting response with primary provider: ${primary.getName()} (${primary.getModelName()})`);
-            return await primary.generate({ messages, systemPrompt, onStatus });
+            return await primary.generate({ messages, systemPrompt, sources, onStatus });
         } catch (primaryErr) {
             console.warn(`[AI] Primary provider (${primary.getName()}) failed:`, primaryErr.message);
 
@@ -103,7 +124,7 @@ export class AIProviderManager {
                 if (onStatus) {
                     onStatus({ status: "generating", label: "Using fallback provider..." });
                 }
-                return await fallback.generate({ messages, systemPrompt, onStatus });
+                return await fallback.generate({ messages, systemPrompt, sources, onStatus });
             } catch (fallbackErr) {
                 console.error(`[AI] Fallback provider (${fallback.getName()}) also failed:`, fallbackErr.message);
                 throw new AIServiceUnavailableError(null, {
@@ -115,17 +136,41 @@ export class AIProviderManager {
     }
 
     async *streamResponse({ messages, preferences = {}, memories = [], extraContext = "", onStatus, signal }) {
-        const systemPrompt = this.buildSystemPrompt(preferences, memories, extraContext);
+        const baseSystemPrompt = this.buildSystemPrompt(preferences, memories, extraContext);
         const primary = this.getPrimaryProvider();
         const fallback = this.getFallbackProvider();
+
+        const lastUserMsg = [...messages].reverse().find(m => m.role === "user")?.content || "";
+        let sources = [];
+        let systemPrompt = baseSystemPrompt;
+
+        // Perform search ONCE if needed so both primary and fallback share the identical context and sources
+        if (needsInternetSearch(lastUserMsg)) {
+            const isNews = isNewsQuery(lastUserMsg);
+            if (onStatus) onStatus({ status: "searching", label: isNews ? "Searching latest news..." : "Searching the web..." });
+            try {
+                const searchRes = await searchInternet({ query: lastUserMsg });
+                sources = searchRes.sources || [];
+                if (searchRes.text) {
+                    systemPrompt = `${baseSystemPrompt}\n\n[REAL-TIME SEARCH RESULTS]\n${searchRes.text}\n\n[SEARCH DIRECTIVE]: Prioritize recent and up-to-date information from the real-time search results above when answering. Use the provided publication dates to establish timeline and recency. Do not fabricate dates or cite sources outside the provided results.`;
+                }
+            } catch (sErr) {
+                console.warn("[AI] Search error during stream initialization:", sErr.message);
+            }
+            if (onStatus) onStatus({ status: "reading", label: "Reading sources..." });
+            if (sources.length > 0) {
+                yield { type: "sources", sources };
+            }
+        }
 
         let usedFallback = false;
         let streamFailedEarly = false;
         let textChunksEmitted = 0;
+        let lastPrimaryError = null;
 
         try {
             console.log(`[AI] Starting stream with primary provider: ${primary.getName()} (${primary.getModelName()})`);
-            for await (const event of primary.stream({ messages, systemPrompt, onStatus, signal })) {
+            for await (const event of primary.stream({ messages, systemPrompt, sources, onStatus, signal })) {
                 if (event.type === "chunk" && event.text) {
                     textChunksEmitted++;
                 }
@@ -141,6 +186,7 @@ export class AIProviderManager {
                 return;
             }
         } catch (primaryErr) {
+            lastPrimaryError = primaryErr;
             console.warn(`[AI] Primary provider stream failed (text chunks emitted: ${textChunksEmitted}):`, primaryErr.message);
 
             // If user aborted, do not fall back
@@ -165,7 +211,7 @@ export class AIProviderManager {
                 }
 
                 let fallbackTextChunks = 0;
-                for await (const event of fallback.stream({ messages, systemPrompt, onStatus, signal })) {
+                for await (const event of fallback.stream({ messages, systemPrompt, sources, onStatus, signal })) {
                     if (event.type === "chunk" && event.text) {
                         fallbackTextChunks++;
                     }
@@ -178,6 +224,7 @@ export class AIProviderManager {
             } catch (fallbackErr) {
                 console.error(`[AI] Fallback provider stream failed:`, fallbackErr.message);
                 throw new AIServiceUnavailableError(null, {
+                    primaryError: lastPrimaryError?.message,
                     fallbackError: fallbackErr.message
                 });
             }

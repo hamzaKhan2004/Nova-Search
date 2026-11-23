@@ -1,6 +1,6 @@
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages";
-import { searchInternet } from "../internet.service.js";
+import { searchInternet, isNewsQuery } from "../internet.service.js";
 
 let geminiClient = null;
 
@@ -9,7 +9,7 @@ function getGeminiModel() {
         throw new Error("GEMINI_API_KEY is not configured");
     }
 
-    const modelName = process.env.PRIMARY_AI_MODEL || "gemini-3.6-flash";
+    const modelName = process.env.PRIMARY_AI_MODEL || "gemini-3.1-flash-lite";
     return new ChatGoogleGenerativeAI({
         model: modelName,
         apiKey: process.env.GEMINI_API_KEY,
@@ -110,27 +110,27 @@ export class GeminiProvider {
     }
 
     getModelName() {
-        return process.env.PRIMARY_AI_MODEL || "gemini-3.6-flash";
+        return process.env.PRIMARY_AI_MODEL || "gemini-3.1-flash-lite";
     }
 
-    async generate({ messages, systemPrompt, onStatus }) {
+    async generate({ messages, systemPrompt, sources = [], onStatus }) {
         const model = getGeminiModel();
         const lastUserMsg = [...messages].reverse().find(m => m.role === "user")?.content || "";
 
-        let sources = [];
-        let searchContext = "";
+        let currentSources = sources;
+        let formattedSystem = systemPrompt;
 
-        if (needsInternetSearch(lastUserMsg)) {
-            if (onStatus) onStatus({ status: "searching", label: "Searching the web..." });
+        if (currentSources.length === 0 && needsInternetSearch(lastUserMsg) && !systemPrompt.includes("[REAL-TIME SEARCH RESULTS]")) {
+            const isNews = isNewsQuery(lastUserMsg);
+            if (onStatus) onStatus({ status: "searching", label: isNews ? "Searching latest news..." : "Searching the web..." });
             const searchRes = await searchInternet({ query: lastUserMsg });
-            sources = searchRes.sources || [];
+            currentSources = searchRes.sources || [];
             if (searchRes.text) {
-                searchContext = `\n\n[REAL-TIME SEARCH RESULTS]\n${searchRes.text}`;
+                formattedSystem = `${systemPrompt}\n\n[REAL-TIME SEARCH RESULTS]\n${searchRes.text}\n\n[SEARCH DIRECTIVE]: Prioritize recent and up-to-date information from the real-time search results above when answering. Use the provided publication dates to establish timeline and recency. Do not fabricate dates or cite sources outside the provided results.`;
             }
             if (onStatus) onStatus({ status: "reading", label: "Reading sources..." });
         }
 
-        const formattedSystem = `${systemPrompt}${searchContext}`;
         const langChainMessages = [
             new SystemMessage(formattedSystem),
             ...messages.map(m => (m.role === "user" ? new HumanMessage(m.content) : new AIMessage(m.content)))
@@ -138,40 +138,40 @@ export class GeminiProvider {
 
         if (onStatus) onStatus({ status: "generating", label: "Generating response..." });
 
-        const result = await model.invoke(langChainMessages);
+        const requestSignal = AbortSignal.timeout(30000);
+        const result = await model.invoke(langChainMessages, { signal: requestSignal });
         const text = typeof result.content === "string" ? result.content : result.text || "";
 
         return {
             content: text,
-            sources,
+            sources: currentSources,
             provider: "gemini",
             model: this.getModelName()
         };
     }
 
-    async *stream({ messages, systemPrompt, onStatus, signal }) {
+    async *stream({ messages, systemPrompt, sources = [], onStatus, signal }) {
         const model = getGeminiModel();
         const lastUserMsg = [...messages].reverse().find(m => m.role === "user")?.content || "";
 
-        let sources = [];
-        let searchContext = "";
+        let currentSources = sources;
+        let formattedSystem = systemPrompt;
 
-        if (needsInternetSearch(lastUserMsg)) {
-            if (onStatus) onStatus({ status: "searching", label: "Searching the web..." });
+        // Only search if search results were not preloaded and not in prompt
+        if (currentSources.length === 0 && needsInternetSearch(lastUserMsg) && !systemPrompt.includes("[REAL-TIME SEARCH RESULTS]")) {
+            const isNews = isNewsQuery(lastUserMsg);
+            if (onStatus) onStatus({ status: "searching", label: isNews ? "Searching latest news..." : "Searching the web..." });
             const searchRes = await searchInternet({ query: lastUserMsg });
-            sources = searchRes.sources || [];
+            currentSources = searchRes.sources || [];
             if (searchRes.text) {
-                searchContext = `\n\n[REAL-TIME SEARCH RESULTS]\n${searchRes.text}`;
+                formattedSystem = `${systemPrompt}\n\n[REAL-TIME SEARCH RESULTS]\n${searchRes.text}\n\n[SEARCH DIRECTIVE]: Prioritize recent and up-to-date information from the real-time search results above when answering. Use the provided publication dates to establish timeline and recency. Do not fabricate dates or cite sources outside the provided results.`;
             }
             if (onStatus) onStatus({ status: "reading", label: "Reading sources..." });
+            if (currentSources.length > 0) {
+                yield { type: "sources", sources: currentSources };
+            }
         }
 
-        // Yield structured sources event
-        if (sources.length > 0) {
-            yield { type: "sources", sources };
-        }
-
-        const formattedSystem = `${systemPrompt}${searchContext}`;
         const langChainMessages = [
             new SystemMessage(formattedSystem),
             ...messages.map(m => (m.role === "user" ? new HumanMessage(m.content) : new AIMessage(m.content)))
@@ -179,10 +179,14 @@ export class GeminiProvider {
 
         if (onStatus) onStatus({ status: "generating", label: "Generating response..." });
 
-        const stream = await model.stream(langChainMessages, { signal });
+        const requestSignal = signal
+            ? AbortSignal.any([signal, AbortSignal.timeout(30000)])
+            : AbortSignal.timeout(30000);
+
+        const stream = await model.stream(langChainMessages, { signal: requestSignal });
 
         for await (const chunk of stream) {
-            if (signal?.aborted) break;
+            if (signal?.aborted || requestSignal?.aborted) break;
             const textChunk = typeof chunk.content === "string" ? chunk.content : chunk.text || "";
             if (textChunk) {
                 yield { type: "chunk", text: textChunk };

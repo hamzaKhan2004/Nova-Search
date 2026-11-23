@@ -75,6 +75,14 @@ export function initSocket(httpServer) {
                 return;
             }
 
+            // Abort and clean up any prior active stream on this socket before starting a new one
+            const prevController = activeStreams.get(socket.id);
+            if (prevController) {
+                console.log(`[SOCKET] Aborting prior stream on socket ${socket.id} due to new message`);
+                prevController.abort(new Error("SUPERSEDED_BY_NEW_MESSAGE"));
+                activeStreams.delete(socket.id);
+            }
+
             let currentChatId = chatId;
             let currentChat = null;
 
@@ -229,9 +237,15 @@ export function initSocket(httpServer) {
                     emailAgentContext = `[EMAIL AGENT DIRECTIVE]: The user wants to compose or send an email/mail. Nova's interactive Email Action Card has ALREADY been generated and displayed directly above in the UI with recipient: "${draftDetails.to || "(to be confirmed)"}", subject: "${draftDetails.subject}", and the drafted content. DO NOT state that you cannot send emails or lack email access. DO NOT provide nodemailer scripts or local code. Simply inform the user that their email draft is ready above for review and instruct them to click "Confirm & Send Email" to send it.`;
                 }
 
-                // 4. Stream AI Response
+                // 4. Stream AI Response with overall safety timeout
                 const abortController = new AbortController();
                 activeStreams.set(socket.id, abortController);
+
+                const streamTimeoutMs = 50000;
+                const timeoutId = setTimeout(() => {
+                    console.warn(`[SOCKET] Stream reached overall safety timeout (${streamTimeoutMs}ms) for socket ${socket.id}`);
+                    abortController.abort(new Error("GENERATION_TIMEOUT"));
+                }, streamTimeoutMs);
 
                 let accumulatedText = "";
                 let accumulatedSources = [];
@@ -272,15 +286,29 @@ export function initSocket(httpServer) {
                     }
                 }
 
+                clearTimeout(timeoutId);
                 activeStreams.delete(socket.id);
 
-                if (!abortController.signal.aborted) {
-                    const finalContent = accumulatedText.trim();
-                    if (!finalContent) {
-                        throw new Error(
-                            "Nova was unable to generate a valid response. Please retry your question or contact support at hamzakhantz@gmail.com."
-                        );
+                if (abortController.signal.aborted) {
+                    const isTimeout =
+                        abortController.signal.reason?.message === "GENERATION_TIMEOUT" ||
+                        abortController.signal.reason === "GENERATION_TIMEOUT";
+                    if (isTimeout) {
+                        socket.emit("chat:error", {
+                            chatId: currentChatId,
+                            message: "Response generation timed out. Please retry your message.",
+                            code: "TIMEOUT"
+                        });
                     }
+                    return;
+                }
+
+                const finalContent = accumulatedText.trim();
+                if (!finalContent) {
+                    throw new Error(
+                        "Nova was unable to generate a valid response. Please retry your question or contact support at hamzakhantz@gmail.com."
+                    );
+                }
 
                     // 5. Persist final completed AI message to DB
                     const aiMessage = await messageModel.create({
@@ -310,7 +338,6 @@ export function initSocket(httpServer) {
 
                     // 6. Background durable memory detection
                     detectAndStoreDurableMemory({ userId, message }).catch(() => {});
-                }
             } catch (err) {
                 activeStreams.delete(socket.id);
                 console.error("[SOCKET] Streaming error:", err);

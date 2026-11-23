@@ -68,6 +68,13 @@ const chatSlice = createSlice({
         setError: (state, action) => {
             state.error = action.payload;
             state.isLoading = false;
+            state.streamingMessage = null;
+            state.generationStatus = null;
+        },
+        resetGenerationState: (state) => {
+            state.isLoading = false;
+            state.streamingMessage = null;
+            state.generationStatus = null;
         },
         setSearchQuery: (state, action) => {
             state.searchQuery = action.payload;
@@ -76,11 +83,13 @@ const chatSlice = createSlice({
             state.generationStatus = action.payload;
         },
         setSources: (state, action) => {
-            const { sources } = action.payload;
+            const { chatId, sources } = action.payload;
             if (state.streamingMessage) {
                 state.streamingMessage.sources = sources;
+                if (chatId) state.streamingMessage.chatId = chatId;
             } else {
                 state.streamingMessage = {
+                    chatId,
                     content: "",
                     role: "ai",
                     sources,
@@ -168,6 +177,7 @@ export const {
     setCurrentChatId,
     setLoading,
     setError,
+    resetGenerationState,
     setSearchQuery,
     setGenerationStatus,
     setSources,
